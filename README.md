@@ -37,20 +37,20 @@ So if it's not the version of Valgrind, maybe it's the verson of clang?  I lucki
 ![clang version 9](https://user-images.githubusercontent.com/109809/109354059-74ec1f80-783a-11eb-8c39-3b75ac971620.png)
 ![clang version 10](https://user-images.githubusercontent.com/109809/109354135-8df4d080-783a-11eb-9c7b-57bffa8fe629.png)
 
-The ubuntu apt repository must have been updated and is now grabbing clang version 10.  Luckily I'm able to install multiple versions of clang on my computer so I ran `sudo apt-get install clang-10` and I was able to run my code with it and see a failure locally.  In the [Boost voronoi geometry library](https://www.boost.org/doc/libs/1_75_0/libs/polygon/doc/voronoi_main.htm) of all place.  At least I could reproduce the issue now!
+The ubuntu apt repository must have been updated and is now grabbing clang version 10.  Luckily I'm able to install multiple versions of clang on my computer so I ran `sudo apt-get install clang-10` and I was able to run my code with it and see a failure locally.  In the [Boost voronoi geometry library](https://www.boost.org/doc/libs/1_75_0/libs/polygon/doc/voronoi_main.htm) of all places.  At least I could reproduce the issue now!
 
 # Suspects
 
 1. It seems like clang could be the problem.  Maybe they broke something in the new version?
 2. It's possible that Valgrind was the issue.  It could be that Valgrind is not able to handle clang's latest optimizations.
-3. Libboost: I hadn't upgraded but maybe an optimization or improvement in Valgrind surfaced somthing new?
+3. libboost: I hadn't upgraded but maybe an optimization or improvement in Valgrind surfaced somthing new?
 
 <details> <summary>Spoiler warning</summary> It's number 2. </details>
  
-Boost hadn't caused me trouble before and clang is quite well-used so I started by investigating Valgrind.  I searched the web for some bug report that mentioned "clang" and "boost" and "Valgrind" and I wanted it to be pretty new because it's only in clang-10 and after.  I don't know if I found *my* bug but I found [*a* bug](https://bugs.kde.org/show_bug.cgi?id=432801#c12) that sounded similar.  It's also clang only and not gcc and only with optimizations at `-O2`.  And it had some sample code that is pretty short.  Sweet!  I tried it on my computer and confirmed that the Valgrind only reports an error:
-* with clang, not gcc
-* clang version 10, not 9 nor 8 or 7
-* only with optimizations at `-O2`
+Boost hadn't caused me trouble before and clang is quite well-used so I started by investigating Valgrind.  I searched the web for some bug report that mentioned "clang" and "boost" and "Valgrind" and I wanted it to be pretty new because it's only in clang-10 and after.  I don't know if I found *my* bug but I found [*a* bug](https://bugs.kde.org/show_bug.cgi?id=432801#c12) that sounded similar.  It's also clang only and not gcc and only with optimizations at `-O2`.  And it had some sample code that is pretty short.  Sweet!  I tried it on my computer and confirmed that Valgrind only reports an error:
+* with **clang**, not gcc
+* clang **version 10**, not 9 nor 8 or 7
+* only with optimizations at **`-O2`**
 
 Here's that code:
 
@@ -58,14 +58,6 @@ Here's that code:
 // clang -W -Wall -g -O2 Standalone.c && valgrind --track-origins=yes ./a.out
 
 #include <signal.h>
-
-unsigned long myLen(const char* p_str)
-{
-    unsigned long i=0;
-    while (p_str[i]!=0)
-        ++i;
-    return i;
-}
 
 int main()
 {
@@ -79,7 +71,7 @@ int main()
 
     char pattern[] = "12345678 ";
     pattern[0] = '1';
-    const unsigned long plen = myLen(pattern);
+    const unsigned long plen = strlen(pattern);
 
     size_t hs=0;
     size_t hp=0;
@@ -94,12 +86,12 @@ int main()
 }
 ```
 
-Lots of weird stuff about the bug:
+Lots of weird stuff about that bug:
 
 1. The error goes away if you don't call sigaction twice or more.
 2. The error goes away if you don't set the first byte in `pattern` to a `1`, even though it's already a `1`.
 3. The error goes away if you make the `pattern` shorter.
-4. The error goes away if you remove the comparison.
+4. The error goes away if you remove the `==` comparison.
 5. The error goes away if you replace plen with a constant 9, even though `plen` is always equal to 9.
 
 ![WTF?](https://user-images.githubusercontent.com/109809/109370251-cc9b8280-785c-11eb-94c6-4a4aae1e9ecb.png)
@@ -112,7 +104,7 @@ I started with looking into Valgrind's memcheck.  Valgrind is *enormous* and I d
 
 First, I learned how Valgrind memcheck works: For every bit in memory and in registers in the CPU, Valgrind keeps track of whether or not that bit has a "defined" value.  "Defined" means that the bit was set by the program.  For example, if you declare a variable, all the bytes in that variable are marked undefined.  After you assign a value to it, those bits get marked defined.  (Another thing that Valgrind keeps track of, per byte in memory, is whether or not it is "accessible", that is, you didn't walk off the end of your array.  That part isn't pertinent for this bug.)
 
-Valgrind stores all of this in the "shadow" memory.  Knowing that most memory is never accessed and knowing that most bytes are either enitrely defined or entirely undefined, Valgrind can compress the shadow memory instead of storing 9 bits per byte.
+Valgrind stores all of this in the "shadow" memory.  Knowing that most memory is never accessed and knowing that most bytes are either enitrely defined or entirely undefined, Valgrind has all sorts of tricks to store the shadow memory.
 
 Valgrind can also compute the definedness of variables based on that of other variables:
 
@@ -120,13 +112,21 @@ Valgrind can also compute the definedness of variables based on that of other va
 int a = b + c;
 ```
 
-`a` is defined if both `b` and `c` are defined.  But if either of them is unknown, like maybe you forgot to initialize, then so is `a`.  The definedness equation of that one might be:
+`a` is defined if both `b` and `c` are defined.  But if either of them is unknown, like maybe you forgot to initialize `b`, then so is `a`.  The definedness equation of that one might be:
 
 ```c
 defined_a = defined_b && defined_c;
 ```
 
-Some definedness equations can be trickier!  For example, if you shift a variable 5 bits to the left, the definedness of the bits also shitft to the left and the lower five bits become defined, they are 0s.  Even in the addition example above: If you know the lower bits then the lower bits are defined, even if you don't know the upper ones.
+Some definedness equations can be trickier!  For example, if you shift a variable 5 bits to the left, the definedness of the bits also shitft to the left and the lower five bits become defined, they are 0s.
+
+```c++
+int x;
+x <<= 5;
+// The rightmost 5 bits are defined (they are zero).
+```
+
+Even in the addition example above: If you know some of the lower bits then the lower bits are defined, even if you don't know the upper ones.
 
 So Valgrind memcheck just needs to disassemble your program, run it one instruction at a time while maintaining the shadow, and everytime you hit a branch, check if the direction of the branch depends on undefined bits.  That would be incredibly slow.  Instead, Valgrind just-in-time replaces your instructions with new instructions that will both do the original work **and** also update the shadow or check it as needed.  Memcheck is the plugin to Valgrind that determines how to instrument the code.  Valgrind is the part that disassembles and re-assembles the code.
 
@@ -156,11 +156,11 @@ Then follow the instructions to startup gdb and connect.  Because you're going t
 
 The problematic loop which just adds up characters in the string is only for strings with more than 8 characters because it has a complex optimization in it: It uses [x86's SIMD](https://en.wikipedia.org/wiki/Streaming_SIMD_Extensions) registers, `xmm0` through `xmm4`, to add up all the bytes with less looping.  I assume that the clang people did the measurements and figured out that this complex code is faster than a much shorter and simpler routine that does a lot more branching.
 
-I compiled the code both with and without the second call to `sigaction` and ran it with `vgdb`.  What I discovered was that the second call to `sigaction` was causing more of those xmm SIMD registers to be marked as undefined by valgrind.  Why?  Well, stepping through the `sigaction` code with `vgdb` turned up some small usage of `xmm` registers in `sigaction`.  That usage loaded into xmm registers from memory.  I don't know what it did with it but some of what it read up was junk values.  Though each time the reading into xmm was done from the same place in memory, the first time read it while it was defined and the second time didn't.  I don't know how those values got marked undefined but it was only on the second go.  Maybe due to some write that saved registers to the stack that weren't defined in the first place?
+I compiled the code both with and without the second call to `sigaction` and ran it with `vgdb`.  What I discovered was that the second call to `sigaction` was causing more of those xmm SIMD registers to be marked as undefined by valgrind.  Why?  Well, stepping through the `sigaction` code with `vgdb` turned up some small usage of `xmm` registers in `sigaction`.  That usage loaded into xmm registers from memory.  I don't know what it did with it but the first time around, it read memory that had been previously set in the stack.  And the second time around, some of what it read up was junk values.  Although each time the reading into xmm was done from the same place in memory, the first time read it while it was defined and the second time didn't.  I don't know how those values got marked undefined but it was only on the second go.  Maybe due to some write that saved registers to the stack that weren't defined in the first place?
 
 # Aha, a bug!
 
-No, __not a bug__.  Just having garbage in your registers isn't dangerous.  After all, when you allocate an array, it starts with garbage.  Even reading it is okay.  Only when your code depends on it for observable output, for example, a branch.  I also read up on the [x86 calling conventions](https://stackoverflow.com/a/18024743/4454).  Turns out a function *is* allowed to foul your xmm registers.  Programs must not rely on xmm registers being unchanged before and after a function call.  (aka caller-saved)
+No, __not a bug__.  Just having garbage in your registers isn't dangerous.  After all, when you allocate an array, it starts with garbage.  Even reading it is okay.  Only when your code depends on it for observable output, for example, a branch.  I also read up on the [x86 calling conventions](https://stackoverflow.com/a/18024743/4454).  Turns out a function *is* allowed to foul your xmm registers.  Programs must not rely on xmm registers being unchanged before and after a function call (aka caller-saved).
 
 Anyway, the fouled information in the xmm registers was all zeros anyway because that part of the stack was always zeros in my testing.  Maybe the clang optimization was faulty and Valgrind was right?  One way to find out is to fill that xmm with garbage and see what happens.  [That's what I did with some assembly code.](https://godbolt.org/z/6s1rTd).  And sure enough, clang was giving all sorts of wrong answers!
 
@@ -168,7 +168,7 @@ Anyway, the fouled information in the xmm registers was all zeros anyway because
 
 No, __not a bug__.
 
-I hopped on to the [LLVM discord](https://discord.com/channels/636084430946959380/636732781086638081) to ask if I'd found a bonafide clang bug.  I hadn't.  Once you start mucking with assembly instructions in your code improperly, you are liable to confuse the compiler.  I didn't mark my function as reserving any of those `xmm` registers so it happily inlined my code and I got all sorts of chaos.  Back to the drawing board.
+I hopped on to the [LLVM discord](https://discord.com/channels/636084430946959380/636732781086638081) to ask if I'd found a bonafide clang bug.  I hadn't.  Once you start mucking with assembly instructions in your code improperly, you are liable to confuse the compiler.  I didn't mark my function as reserving any of those `xmm` registers so it happily inlined my code and I got all sorts of chaos.  Back to the drawing board!
 
 I figured that if I can fill the stack with garbage instead of zeros, then sigaction might read garbage instead of zeros into the `xmm` registers.  Then the routine would continue onward and eventually screw up the answer **without writing assembly code**.  I needed a way to add a bunch of junk on the stack, and it had to be something that the compiler wouldn't optimize away.  Maybe this isn't the shortest way to do it but here's what I came up with:
 
@@ -195,7 +195,7 @@ When you call it, the stack will stretch itself out to fit those 500 floats.  Th
 
 ![diagram of the stack changes](https://user-images.githubusercontent.com/109809/109371364-be9c3080-7861-11eb-9e81-fff5c83d6c64.png)
 
-_It worked!_  xmm registers were full of seemingly random data when the loop started.  But, the answer was still correct.  Valgrind was still complaining about  computation based on undefined values.
+_It worked!_  xmm registers were full of seemingly random data when the loop started.  But, the answer was still correct.  Valgrind was still complaining about  computation based on undefined values and the xmm register was filled with random-looking bits yet still the answer was right.
 
 # My final attempt
 
@@ -221,7 +221,7 @@ For the explanation of the code above, we'll use:
 * **X** for undefined garbage bytes, and 
 * **0** for defined 0 bytes.  One letter per byte.
 
-* Step (1) is putting a known value into xmm2.  mov**d** is double-word, 4-bytes, so xmm2 is now well-defined as **`abcd0000000000000000`**
+* Step (1) is putting a known value into xmm2.  mov**d** is **d**ouble-word, 4-bytes, so xmm2 is now well-defined: **`abcd0000000000000000`**
 * Step (2) is byte-wise interleaving the value in xmm2 with itself.  So `xmm2` is now **`aabbccdd00000000`**.
 ![image](https://user-images.githubusercontent.com/109809/109371646-1a1aee00-7863-11eb-91f2-f81dfc7ab2cf.png)
 * Step (3) is word-wise (16b) interleaving `xmm2` with `xmm3`.  Remember that `xmm3` starts totally undefined so `xmm3` is now **`aaXXbbXXccXXddXX`**.
@@ -246,15 +246,15 @@ ccXX < 0 ? -1 : 0
 ddXX < 0 ? -1 : 0
 ```
 
-That just a check to see if the number on the left is negative.  And to know if a number is negative in 2's-complement, you only need to know the first bit of it.  And we **do** know the first bit.  So the answer is actually fully defined.  clang has no bug!  So why is Valgrind complaining?
+That's just a check to see if the number on the left is negative.  And to know if a number is negative in 2's-complement, you only need to know the first bit of it.  And we **do** know the first bit.  So the answer is actually fully defined.  clang has no bug!  So why is Valgrind complaining?
 
-It's because Valgrind **doesn't** know about zeros.  Remember, it only knows defined and undefined.  It doesn't keep track of whether a bit is a zero or not.  It *could* but that would potentially make Valgrind run slower and it's already a 5-10x slowdown on your code.  So for Valgrind, it sees 4 comparisons like these:
+It's because Valgrind **doesn't** know about zeros.  Remember, it only knows defined and undefined.  So for Valgrind, it sees 4 comparisons like these:
 
 ```
 aaXX < qrst ? -1 : 0
 ```
 
-It's no longer enough to look at just the first bit because what if `aa` is the same as `qr`?  You'll have to look at those `X`s to figure out the answer and so the undefinedness taints the comparison and xmm4 is **not** considered defined.  That undefinedness eventually `valgrind` complains.
+It's no longer enough to look at just the first bit because what if `aa` is the same as `qr`?  You'll have to look at those `X`s to figure out the answer and so the undefinedness taints the comparison and xmm4 is **not** considered defined.  That undefinedness eventually makes its way to the if statement and `valgrind` complains.
 
 # A fix
 
@@ -290,7 +290,7 @@ void asm_test() {
 }
 ```
 
-Compiled it, and then ran `objdump -D` on it and got this:
+I compiled it, and then ran `objdump -D` on it and got this:
 
 ```
   401697:       66 0f 6e d2             movd   %edx,%xmm2
@@ -309,12 +309,72 @@ Then I opened up my editor (emacs in hexl-mode) and carefully modified the binar
 
 Great success.
 
-# Next steps
+# Next step: Fix clang?
 
-Find out where in LLVM's clang code the generation for that optimization exists and impose on it some requirement that the registers for the `movd`/`punpcklbw`/`punpcklwd` sequence must all be the same `xmm` register.  There could be concerns with that:
+I wanted to find out where in LLVM's clang code the generation for that optimization exists and impose on it some requirement that the registers for the `movd`/`punpcklbw`/`punpcklwd` sequence must all be the same `xmm` register.  There could be concerns with that:
 
 * I don't see how there could be any danger in clobbering an xmm register that we're about to clobber anyway.  But maybe there's some reason.
 * There might be a _delay_.  A delay is when the CPU is designed such that if you call a certain sequence of instructions, it will put everything on hold.  For example, if you read from memory and then try to use it immediately, maybe your CPU will pause until the read is done.  Better to interleave something else.
 * There might be a _hazard_.  A hazard is like a delay except that instead of putting the CPU on pause, you simply get undefined behavior if you don't wait long enough.
 
-I don't expect any of those to be true because there are plenty of examples where other registers are read in sequence without a problem.  But maybe there's a good reason.  Maybe the others were in sequence because the compiler ran out of registers to allocate.  The chip manufacturers will publish these details.
+I got on the LLVM discord and email lists and asked.  There was an easy solution, but it caused less performant code from clang.  That's not acceptable.  Anyway, clang shouldn't have to be fixing Valgrind.
+
+# Fix Valgrind
+
+Valgrind disassembles your code, re-assembles it into new code that also tracks definedness, and then runs it.  The check for SIMD 4-way greater-than was to just check each of the 4 numbers in the 128 bit registers for definedness and if any part of a comparison is undefined, so is the output.  For example:
+
+```
+Compare XXXX  0000  44XX  1234
+with    0000  1234  0000  XXXX
+
+results in:
+        undef def   undef undef
+```
+
+But we could be doing better.  For that third value, anything that starts with a `4` is sure to be bigger than `0000`.  All that we need to do is tell Valgrind about it.
+
+After disassembly, Valgrind has access to both the value and the definedness of each bit.  What if we make the definedness check a little smarter?  For a value that is part knowns (0 and 1 bits) and part unknowns ("X" bits), we can compute the maximum possible value that and minimum possible value that it could have.  If the minimum of one of the numbers is greater than the maximum of the other then we know the answer of the comparison, despite the unknowns.  And vice-versa.  Only when their ranges overlap is there uncertainty.
+
+```c++
+bool isGreaterThanDefined(int xx, int yy, // the current values
+                          int vxx, int vyy) { // the Xs, where 1 means undefined and 0 means defined
+  auto not_vxx = ~vxx;
+  auto not_vyy = ~vyy;
+  auto min_xx = xx & not_vxx;
+  auto min_yy = yy & not_vyy;
+  auto max_xx = xx | vxx;
+  auto max_yy = yy | vyy;
+  if (min_xx > max_yy) {
+    return true; // Whatever xx is, it'll be greater than yy.
+  } else if (!(max_xx > min_yy)) {
+    return true; // Whatever xx is, it'll never be greater than yy.
+  } else {
+    return false; // There is uncertainty.
+  }
+}
+```
+
+This code doesn't work.  The problem is that replacing all `X`s with `1`s doesn't always make a signed integer number bigger because in the MSB, the sign bit is 0 for positive and 1 for negative.  So we need to flip the MSBs before we compute the max and min and then flip them back.
+
+```c++
+bool isGreaterThanDefined(int xx, int yy, // the current values
+                          int vxx, int vyy) { // the Xs, where 1 means undefined and 0 means defined
+  xx ^= MIN_INT;
+  yy ^= MIN_INT;
+  auto not_vxx = ~vxx;
+  auto not_vyy = ~vyy;
+  auto min_xx = xx & not_vxx;
+  auto min_yy = yy & not_vyy;
+  auto max_xx = xx | vxx;
+  auto max_yy = yy | vyy;
+  xx ^= MIN_INT;
+  yy ^= MIN_INT;
+  if (min_xx > max_yy) {
+    return true; // Whatever xx is, it'll be greater than yy.
+  } else if (!(max_xx > min_yy)) {
+    return true; // Whatever xx is, it'll never be greater than yy.
+  } else {
+    return false; // There is uncertainty.
+  }
+}
+```
