@@ -98,7 +98,7 @@ Lots of weird stuff about that bug:
 
 # Digging into Valgrind
 
-I started with looking into Valgrind's memcheck.  Valgrind is *enormous* and I did a lot of reading of [code](https://sourceware.org/git/?p=valgrind.git;a=tree;f=memcheck;h=d4028ce4318612ec3e43e91fdf1e849b20976186;hb=HEAD) and eventually the [white paper](https://www.valgrind.org/docs/memcheck2005.pdf), too.
+I started with looking into Valgrind's memcheck.  I did a lot of reading of [code](https://sourceware.org/git/?p=valgrind.git;a=tree;f=memcheck;h=d4028ce4318612ec3e43e91fdf1e849b20976186;hb=HEAD) and eventually the [white paper](https://www.valgrind.org/docs/memcheck2005.pdf), too.
 
 ## How Valgrind works
 
@@ -128,7 +128,7 @@ x <<= 5;
 
 Even in the addition example above: If you know some of the lower bits then the lower bits are defined, even if you don't know the upper ones.
 
-So Valgrind memcheck just needs to disassemble your program, run it one instruction at a time while maintaining the shadow, and everytime you hit a branch, check if the direction of the branch depends on undefined bits.  That would be incredibly slow.  Instead, Valgrind just-in-time replaces your instructions with new instructions that will both do the original work **and** also update the shadow or check it as needed.  Memcheck is the plugin to Valgrind that determines how to instrument the code.  Valgrind is the part that disassembles and re-assembles the code.
+So Valgrind memcheck just needs to disassemble your program and run it one instruction at a time while maintaining the shadow.  Everytime you hit a branch, check if the direction of the branch depends on undefined bits.  That would be incredibly slow.  Instead, Valgrind just-in-time replaces your instructions with new instructions that will both do the original work **and** also update the shadow or check it as needed.  Memcheck is the plugin to Valgrind that determines how to instrument the code.  Valgrind is the part that disassembles and re-assembles the code.
 
 # Back to debugging
 
@@ -170,7 +170,7 @@ No, __not a bug__.
 
 I hopped on to the [LLVM discord](https://discord.com/channels/636084430946959380/636732781086638081) to ask if I'd found a bonafide clang bug.  I hadn't.  Once you start mucking with assembly instructions in your code improperly, you are liable to confuse the compiler.  I didn't mark my function as reserving any of those `xmm` registers so it happily inlined my code and I got all sorts of chaos.  Back to the drawing board!
 
-I figured that if I can fill the stack with garbage instead of zeros, then sigaction might read garbage instead of zeros into the `xmm` registers.  Then the routine would continue onward and eventually screw up the answer **without writing assembly code**.  I needed a way to add a bunch of junk on the stack, and it had to be something that the compiler wouldn't optimize away.  Maybe this isn't the shortest way to do it but here's what I came up with:
+I figured that if I can fill the stack with garbage instead of zeros, then sigaction might read garbage instead of zeros into the `xmm` registers.  Then the routine would continue onward and eventually screw up the answer **without assembly code**.  I needed a way to add a bunch of junk on the stack and it had to be something that the compiler wouldn't optimize away.  Maybe this isn't the shortest way to do it but here's what I came up with:
 
 ```c
 #define STACK_FILL_SIZE 500
@@ -195,7 +195,7 @@ When you call it, the stack will stretch itself out to fit those 500 floats.  Th
 
 ![diagram of the stack changes](https://user-images.githubusercontent.com/109809/109371364-be9c3080-7861-11eb-9e81-fff5c83d6c64.png)
 
-_It worked!_  xmm registers were full of seemingly random data when the loop started.  But, the answer was still correct.  Valgrind was still complaining about  computation based on undefined values and the xmm register was filled with random-looking bits yet still the answer was right.
+_It worked!_  xmm registers were full of seemingly random data when the loop started.  But, **the output was still correct**.  Valgrind was still complaining about computation based on undefined values and the xmm register was filled with random-looking bits yet still the answer was right.
 
 # My final attempt
 
@@ -217,16 +217,19 @@ I started to read the assembly code that clang generates to optimize the loop.  
 ```
 
 For the explanation of the code above, we'll use:
+
 * small letters (**abcdqrst**) for known bytes, 
 * **X** for undefined garbage bytes, and 
 * **0** for defined 0 bytes.  One letter per byte.
 
-* Step (1) is putting a known value into xmm2.  mov**d** is **d**ouble-word, 4-bytes, so xmm2 is now well-defined: **`abcd0000000000000000`**
-* Step (2) is byte-wise interleaving the value in xmm2 with itself.  So `xmm2` is now **`aabbccdd00000000`**.
+Steps explained:
+
+1. Putting a known value into xmm2.  mov**d** is **d**ouble-word, 4-bytes, so xmm2 is now well-defined: **`abcd0000000000000000`**
+2. Byte-wise interleaving the value in xmm2 with itself.  So `xmm2` is now **`aabbccdd00000000`**.
 ![image](https://user-images.githubusercontent.com/109809/109371646-1a1aee00-7863-11eb-91f2-f81dfc7ab2cf.png)
-* Step (3) is word-wise (16b) interleaving `xmm2` with `xmm3`.  Remember that `xmm3` starts totally undefined so `xmm3` is now **`aaXXbbXXccXXddXX`**.
-* Ignore step (4) for now, just notice that it clobbers whatever value was in `xmm2`.
-* Step (5) sets `xmm4` to all 0: **`0000000000000000`**
+3. Word-wise (16b) interleaving `xmm2` with `xmm3`.  Remember that `xmm3` starts totally undefined so `xmm3` is now **`aaXXbbXXccXXddXX`**.
+4. Ignore for now, just notice that it clobbers whatever value was in `xmm2`.
+5. Sets `xmm4` to all 0: **`0000000000000000`**
 
 Step (6) is the tricky one.  It's doing a [signed, double-word (32-bit) SIMD comparison](https://www.felixcloutier.com/x86/pcmpgtb:pcmpgtw:pcmpgtd) of `xmm3` and `xmm4` and putting the result as a 0 or -1 into xmm4.  It works like this: Chop up the bits into 32-bit numbers.  If the `xmm4` number is bigger than the `xmm3` number, the `xmm4` position will be filled with ones.  Otherwise, zeros.  So the 4 comparisons look like this (MSB-first):
 
@@ -333,7 +336,7 @@ results in:
 
 But we could be doing better.  For that third value, anything that starts with a `4` is sure to be bigger than `0000`.  All that we need to do is tell Valgrind about it.
 
-After disassembly, Valgrind has access to both the value and the definedness of each bit.  What if we make the definedness check a little smarter?  For a value that is part knowns (0 and 1 bits) and part unknowns ("X" bits), we can compute the maximum possible value that and minimum possible value that it could have.  If the minimum of one of the numbers is greater than the maximum of the other then we know the answer of the comparison, despite the unknowns.  And vice-versa.  Only when their ranges overlap is there uncertainty.
+After disassembly, Valgrind has access to both the value and the definedness of each bit.  What if we make the definedness check a little smarter?  For a value that is part knowns (0 and 1 bits) and part unknowns ("X" bits), we can compute the maximum and minimum possible value that it could have.  We can compare the minimum of one with the maximum of the other and if there's no overlap then we know the answer despite the unknowns.  And vice-versa.  Only when their ranges overlap is there uncertainty.
 
 ```c++
 bool isGreaterThanDefined(int xx, int yy, // the current values
