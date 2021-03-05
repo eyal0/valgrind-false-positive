@@ -1,5 +1,5 @@
 # valgrind-false-positive
-**tl;dr:** A deep investigation into a Valgrind false-positive that took me like 15 hours to figure out.
+**tl;dr:** A deep investigation into a Valgrind false-positive leading to a fix.
 
 # Intro
 
@@ -324,7 +324,7 @@ I got on the LLVM discord and email lists and asked.  There was an easy solution
 
 # Fix Valgrind
 
-Valgrind disassembles your code, re-assembles it into new code that also tracks definedness, and then runs it.  The check for SIMD 4-way greater-than was to just check each of the 4 numbers in the 128 bit registers for definedness and if any part of a comparison is undefined, so is the output.  For example:
+Valgrind disassembles your code, re-assembles it into new code that also tracks definedness, and then runs it.  The check for SIMD 4-way greater-than was to just check each of the 4 numbers in the 128 bit registers for definedness and if **any part** of a comparison is undefined then  so is **all** the output.  For example:
 
 ```
 Compare XXXX  0000  44XX  1234
@@ -336,7 +336,7 @@ results in:
 
 But we could be doing better.  For that third value, anything that starts with a `4` is sure to be bigger than `0000`.  All that we need to do is tell Valgrind about it.
 
-After disassembly, Valgrind has access to both the value and the definedness of each bit.  What if we make the definedness check a little smarter?  For a value that is part knowns (0 and 1 bits) and part unknowns ("X" bits), we can compute the maximum and minimum possible value that it could have.  We can compare the minimum of one with the maximum of the other and if there's no overlap then we know the answer despite the unknowns.  And vice-versa.  Only when their ranges overlap is there uncertainty.
+After disassembly, Valgrind has access to both the value and the definedness of each bit.  What if we make the definedness check a little smarter?  For a value that is part knowns (`0` and `1` bits) and part unknowns (`X` bits), we can compute the maximum and minimum possible value that it could have.  We can compare the minimum of one with the maximum of the other and if there's no overlap then we know the answer despite the unknowns.  And vice-versa.  Only when their ranges overlap is there uncertainty.
 
 ```c++
 bool isGreaterThanDefined(int xx, int yy, // the current values
