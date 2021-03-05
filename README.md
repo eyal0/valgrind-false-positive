@@ -378,3 +378,5 @@ bool isGreaterThanDefined(int xx, int yy, // the current values
   }
 }
 ```
+
+All done!  The [actual patch](https://github.com/eyal0/valgrind/commit/34612021c18ddf0beffea2062dfc58c41086e030) looks different because it's written in VEX so that Valgrind can insert it into your code as instrumentation.
