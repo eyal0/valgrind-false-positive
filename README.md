@@ -138,7 +138,7 @@ A good tool was putting the code in [godbolt](https://godbolt.org/z/6s1rTd) and 
 
 I also stepped through the code in gdb and found some more interesting stuff:  _If the string is fewer than 9 bytes, it will not enter the highly optimized loop and instead just do some specialized step for strings of length 8 or fewer.  So the problem must be in the loop._
 
-I still didn't know why calling `sigaction` twice or more makes a different.
+I still didn't know why calling `sigaction` twice or more makes a difference.
 
 Eventually I returned to the docs and found the [guide on using gdb with valgrind](https://www.valgrind.org/docs/manual/manual-core-adv.html).  There are a few options there but but the most important one is that you must run it like this:
 
